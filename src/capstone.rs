@@ -1,63 +1,114 @@
 use libc;
-use std::collections::HashMap;
 use std::convert::From;
 use std::ffi::CStr;
 use std::mem;
 use error::*;
+use builders::CapstoneBuilder;
 use capstone_sys::*;
-use constants::{Arch, Mode, OptValue};
-use instruction::{Insn, Instructions, Detail};
-
+use constants::{Arch, Endian, ExtraMode, Mode, OptValue, Syntax};
+use instruction::{Detail, Insn, Instructions};
 
 /// An instance of the capstone disassembler
+#[derive(Debug)]
 pub struct Capstone {
-    csh: csh, // Opaque handle to cs_engine
-    cs_option_state: HashMap<cs_opt_type, libc::size_t>, // maintains state set with cs_option
+    /// Opaque handle to cs_engine
+    csh: csh,
+
+    mode: usize,
+    endian: usize,
+    syntax: usize,
+    extra_mode: usize,
+    detail_enabled: bool,
+
+    /// We *must* set `mode`, `extra_mode`, and `endian` at once because `capstone`
+    /// handles them inside the arch-specific handler. We store the bitwise OR of these flags that
+    /// can be passed directly to `cs_option()`.
+    raw_mode: usize,
+
+    /// Architecture
     _arch: Arch,
 }
 
+/// Defines a setter on `Capstone` that speculatively changes the arch-specific mode (which
+/// includes `mode`, `endian`, and `extra_mode`)
+macro_rules! define_set_mode {
+    (
+        $( #[$func_attr:meta] )*
+        => $fn_name:ident, $opt_type:ident, $param_name:ident : $param_type:ident ;
+        $cs_base_type:ident
+    ) => {
+        $( #[$func_attr] )*
+        pub fn $fn_name(&mut self, $param_name: $param_type) -> CsResult<()> {
+            let old_val = self.$param_name;
+            self.$param_name = $cs_base_type::from($param_name) as usize;
+
+            let old_raw_mode = self.raw_mode;
+            let new_raw_mode = self.update_raw_mode();
+
+            let result = self._set_cs_option(
+                cs_opt_type::$opt_type,
+                new_raw_mode,
+            );
+
+            if result.is_err() {
+                // On error, restore old values
+                println!("self: {:?}", self);
+                self.raw_mode = old_raw_mode;
+                self.$param_name = old_val;
+            }
+
+            result
+        }
+    }
+}
+
 impl Capstone {
-    /// Create a new instance of the decompiler.
+    /// Create a new instance of the decompiler using the builder pattern interface.
+    /// This is the recommended interface to `Capstone`.
+    ///
+    /// ```
+    /// use capstone::{Capstone, BuildsCapstone, x86};
+    /// let cs = Capstone::new().x86().mode(x86::ArchMode::Mode32).build();
+    /// ```
+    pub fn new() -> CapstoneBuilder {
+        CapstoneBuilder::new()
+    }
+
+    /// Create a new instance of the decompiler using the "raw" interface.
+    /// The user must ensure that only sensical `Arch`/`Mode` combinations are used.
     ///
     /// ```
     /// use capstone::{Arch, Capstone, Mode};
-    /// let cs = Capstone::new(Arch::X86, Mode::Mode64);
+    /// let cs = Capstone::new_raw(Arch::X86, Mode::Mode64);
     /// assert!(cs.is_ok());
     /// ```
-    pub fn new(arch: Arch, mode: Mode) -> CsResult<Capstone> {
+    pub fn new_raw(arch: Arch, mode: Mode) -> CsResult<Capstone> {
         let mut handle = 0;
         let csarch: cs_arch = arch.into();
         let csmode: cs_mode = mode.into();
         let err = unsafe { cs_open(csarch, csmode, &mut handle) };
 
         if cs_err::CS_ERR_OK == err {
-            let mut opt_state: HashMap<cs_opt_type, libc::size_t> = HashMap::new();
-            opt_state.insert(cs_opt_type::CS_OPT_SYNTAX,
-                             CS_OPT_SYNTAX_DEFAULT as libc::size_t);
-            opt_state.insert(cs_opt_type::CS_OPT_DETAIL,
-                             cs_opt_value::CS_OPT_OFF as libc::size_t);
-            opt_state.insert(cs_opt_type::CS_OPT_MODE, mode as libc::size_t);
-            opt_state.insert(cs_opt_type::CS_OPT_MEM, 0);
-            opt_state.insert(cs_opt_type::CS_OPT_SKIPDATA,
-                             cs_opt_value::CS_OPT_OFF as libc::size_t);
+            let syntax = CS_OPT_SYNTAX_DEFAULT as usize;
+            let raw_mode = 0usize;
+            let endian = 0usize;
+            let extra_mode = 0usize;
+            let detail_enabled = false;
 
-            Ok(Capstone {
-                   csh: handle,
-                   cs_option_state: opt_state,
-                   _arch: arch,
-               })
+            let mut cs = Capstone {
+                csh: handle,
+                syntax,
+                endian,
+                mode: csmode as usize,
+                extra_mode,
+                detail_enabled,
+                raw_mode,
+                _arch: arch,
+            };
+            cs.update_raw_mode();
+            Ok(cs)
         } else {
             Err(err.into())
-        }
-    }
-
-    #[inline]
-    fn set_option(&self, opt_type: cs_opt_type, value: usize) -> CsResult<()> {
-        let err = unsafe { cs_option(self.csh, opt_type, value) };
-        if cs_err::CS_ERR_OK == err {
-            Ok(())
-        } else {
-            Err(Error::from(err))
         }
     }
 
@@ -80,12 +131,14 @@ impl Capstone {
     fn disasm(&self, code: &[u8], addr: u64, count: usize) -> CsResult<Instructions> {
         let mut ptr: *mut cs_insn = unsafe { mem::zeroed() };
         let insn_count = unsafe {
-            cs_disasm(self.csh,
-                           code.as_ptr(),
-                           code.len() as libc::size_t,
-                           addr,
-                           count as libc::size_t,
-                           &mut ptr)
+            cs_disasm(
+                self.csh,
+                code.as_ptr(),
+                code.len() as usize,
+                addr,
+                count as usize,
+                &mut ptr,
+            )
         };
         if insn_count == 0 {
             return self.error_result();
@@ -95,33 +148,53 @@ impl Capstone {
         })
     }
 
-    /// Sets the engine's disassembly mode.
-    /// Be careful, various combinations of modes aren't supported
-    /// See the capstone-sys documentation for more information.
-    pub fn set_mode(&mut self, modes: &[Mode]) -> CsResult<()> {
-        let mut value: usize = 0;
-        for mode in modes {
-            let mode = cs_mode::from(*mode);
-            value |= mode as usize;
+    /// Update `raw_mode` with the bitwise OR of `mode`, `extra_mode`, and `endian`.
+    ///
+    /// Returns the new `raw_mode`.
+    fn update_raw_mode(&mut self) -> usize {
+        self.raw_mode = self.mode | self.extra_mode | self.endian;
+        self.raw_mode
+    }
+
+    /// Set extra modes in addition to normal `mode`
+    pub fn set_extra_mode<T: Iterator<Item = ExtraMode>>(&mut self, extra_mode: T) -> CsResult<()> {
+        let old_val = self.extra_mode;
+
+        // Bitwise OR extra modes
+        self.extra_mode = extra_mode.fold(0usize, |acc, x| acc | cs_mode::from(x) as usize);
+        let old_mode = self.raw_mode;
+        let new_mode = self.update_raw_mode();
+        let result = self._set_cs_option(cs_opt_type::CS_OPT_MODE, new_mode);
+
+        if result.is_err() {
+            // On error, restore old values
+            self.raw_mode = old_mode;
+            self.extra_mode = old_val;
         }
-        self.set_option(cs_opt_type::CS_OPT_MODE, value)
+
+        result
     }
 
-    /// Set the X86 assembly to AT&T style (has no effect on other platforms)
-    pub fn att(&self) {
-        self.set_option(
-            cs_opt_type::CS_OPT_SYNTAX,
-            cs_opt_value::CS_OPT_SYNTAX_ATT as usize,
-        ).unwrap()
+    /// Set the assembly syntax (has no effect on some platforms)
+    pub fn set_syntax(&mut self, syntax: Syntax) -> CsResult<()> {
+        let syntax_usize = cs_opt_value::from(syntax) as usize;
+        let result = self._set_cs_option(cs_opt_type::CS_OPT_SYNTAX, syntax_usize);
+
+        if result.is_ok() {
+            self.syntax = syntax_usize;
+        }
+
+        result
     }
 
-    /// Set the X86 assembly to Intel style (default)
-    pub fn intel(&self) {
-        self.set_option(
-            cs_opt_type::CS_OPT_SYNTAX,
-            cs_opt_value::CS_OPT_SYNTAX_INTEL as usize,
-        ).unwrap()
-    }
+    define_set_mode!(
+        /// Set the endianness (has no effect on some platforms)
+        => set_endian, CS_OPT_MODE, endian : Endian; cs_mode);
+    define_set_mode!(
+        /// Sets the engine's disassembly mode.
+        /// Be careful, various combinations of modes aren't supported
+        /// See the capstone-sys documentation for more information.
+        => set_mode, CS_OPT_MODE, mode : Mode; cs_mode);
 
     /// Returns an `CsResult::Err` based on current errno.
     fn error_result<T>(&self) -> CsResult<T> {
@@ -131,14 +204,10 @@ impl Capstone {
     /// Sets disassembling options at runtime.
     ///
     /// Acts as a safe wrapper around capstone's `cs_option`.
-    fn set_cs_option(&mut self,
-                     option_type: cs_opt_type,
-                     option_value: libc::size_t)
-                     -> CsResult<()> {
+    fn _set_cs_option(&mut self, option_type: cs_opt_type, option_value: usize) -> CsResult<()> {
         let err = unsafe { cs_option(self.csh, option_type, option_value) };
 
         if cs_err::CS_ERR_OK == err {
-            self.cs_option_state.insert(option_type, option_value);
             Ok(())
         } else {
             Err(err.into())
@@ -149,8 +218,15 @@ impl Capstone {
     ///
     /// Pass `true` to enable detail or `false` to disable detail.
     pub fn set_detail(&mut self, enable_detail: bool) -> CsResult<()> {
-        let option_value: libc::size_t = OptValue::from(enable_detail).0 as libc::size_t;
-        self.set_cs_option(cs_opt_type::CS_OPT_DETAIL, option_value)
+        let option_value: usize = OptValue::from(enable_detail).0 as usize;
+        let result = self._set_cs_option(cs_opt_type::CS_OPT_DETAIL, option_value);
+
+        // Only update internal state on success
+        if result.is_ok() {
+            self.detail_enabled = enable_detail;
+        }
+
+        result
     }
 
     // @todo: use a type alias for reg_ids
@@ -189,9 +265,7 @@ impl Capstone {
                 return None;
             }
 
-            CStr::from_ptr(_group_name)
-                .to_string_lossy()
-                .into_owned()
+            CStr::from_ptr(_group_name).to_string_lossy().into_owned()
         };
 
         Some(group_name)
@@ -204,21 +278,27 @@ impl Capstone {
     /// 2. Skipdata is disabled
     /// 3. Capstone was not compiled in diet mode
     fn insn_detail<'s, 'i: 's>(&'s self, insn: &'i Insn) -> CsResult<Detail<'i>> {
-       if self.cs_option_state[&cs_opt_type::CS_OPT_DETAIL] == cs_opt_value::CS_OPT_OFF as libc::size_t {
-           Err(Error::Capstone(CapstoneError::DetailOff))
-       } else if insn.id() == 0 {
-           Err(Error::Capstone(CapstoneError::IrrelevantDataInSkipData))
-       } else if Self::is_diet() {
-           Err(Error::Capstone(CapstoneError::IrrelevantDataInDiet))
-       } else {
-           Ok(unsafe { insn.detail() })
-       }
+        if !self.detail_enabled {
+            Err(Error::Capstone(CapstoneError::DetailOff))
+        } else if insn.id() == 0 {
+            Err(Error::Capstone(CapstoneError::IrrelevantDataInSkipData))
+        } else if Self::is_diet() {
+            Err(Error::Capstone(CapstoneError::IrrelevantDataInDiet))
+        } else {
+            Ok(unsafe { insn.detail() })
+        }
     }
 
     /// Returns whether the instruction `insn` belongs to the group with id `group_id`.
     pub fn insn_belongs_to_group(&self, insn: &Insn, group_id: u64) -> CsResult<bool> {
         self.insn_detail(insn)?;
-        Ok(unsafe { cs_insn_group(self.csh, &insn.0 as *const cs_insn, group_id as libc::c_uint) })
+        Ok(unsafe {
+            cs_insn_group(
+                self.csh,
+                &insn.0 as *const cs_insn,
+                group_id as libc::c_uint,
+            )
+        })
     }
 
 
@@ -232,7 +312,9 @@ impl Capstone {
     /// Checks if an instruction implicitly reads a register with id `reg_id`.
     pub fn register_id_is_read(&self, insn: &Insn, reg_id: u64) -> CsResult<bool> {
         self.insn_detail(insn)?;
-        Ok(unsafe { cs_reg_read(self.csh, &insn.0 as *const cs_insn, reg_id as libc::c_uint) })
+        Ok(unsafe {
+            cs_reg_read(self.csh, &insn.0 as *const cs_insn, reg_id as libc::c_uint)
+        })
     }
 
     /// Returns list of ids of registers that are implicitly read by instruction `insn`.
@@ -245,7 +327,9 @@ impl Capstone {
     /// Checks if an instruction implicitly writes to a register with id `reg_id`.
     pub fn register_is_written(&self, insn: &Insn, reg_id: u64) -> CsResult<bool> {
         self.insn_detail(insn)?;
-        Ok(unsafe { cs_reg_write(self.csh, &insn.0 as *const cs_insn, reg_id as libc::c_uint) })
+        Ok(unsafe {
+            cs_reg_write(self.csh, &insn.0 as *const cs_insn, reg_id as libc::c_uint)
+        })
     }
 
     /// Returns a list of ids of registers that are implicitly written to by the instruction `insn`.
