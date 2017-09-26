@@ -1,11 +1,12 @@
 use libc;
 use std::convert::From;
 use std::ffi::CStr;
+use std::marker::PhantomData;
 use std::mem;
 use error::*;
 use builders::CapstoneBuilder;
 use capstone_sys::*;
-use constants::{Arch, Endian, ExtraMode, Mode, OptValue, Syntax};
+use constants::{Arch, CsModeRepr, Endian, ExtraMode, Mode, OptValue, Syntax};
 use instruction::{Detail, Insn, Instructions};
 
 /// An instance of the capstone disassembler
@@ -34,11 +35,12 @@ pub struct Capstone {
 macro_rules! define_set_mode {
     (
         $( #[$func_attr:meta] )*
-        => $fn_name:ident, $opt_type:ident, $param_name:ident : $param_type:ident ;
+        => $($visibility:ident)*, $fn_name:ident,
+            $opt_type:ident, $param_name:ident : $param_type:ident ;
         $cs_base_type:ident
     ) => {
         $( #[$func_attr] )*
-        pub fn $fn_name(&mut self, $param_name: $param_type) -> CsResult<()> {
+        $($visibility)* fn $fn_name(&mut self, $param_name: $param_type) -> CsResult<()> {
             let old_val = self.$param_name;
             self.$param_name = $cs_base_type::from($param_name) as usize;
 
@@ -62,6 +64,21 @@ macro_rules! define_set_mode {
     }
 }
 
+/// Singleton `EmptyExtraModeIter` that represents no extra modes being enabled
+pub static EMPTY_EXTRA_MODE: EmptyExtraModeIter = EmptyExtraModeIter(PhantomData);
+
+/// Represents an empty set of `ExtraMode`
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct EmptyExtraModeIter(PhantomData<()>);
+
+impl Iterator for EmptyExtraModeIter {
+    type Item = ExtraMode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+}
+
 impl Capstone {
     /// Create a new instance of the decompiler using the builder pattern interface.
     /// This is the recommended interface to `Capstone`.
@@ -78,21 +95,35 @@ impl Capstone {
     /// The user must ensure that only sensical `Arch`/`Mode` combinations are used.
     ///
     /// ```
-    /// use capstone::{Arch, Capstone, Mode};
-    /// let cs = Capstone::new_raw(Arch::X86, Mode::Mode64);
+    /// use capstone::{Arch, Capstone, EMPTY_EXTRA_MODE, Mode};
+    /// let cs = Capstone::new_raw(Arch::X86, Mode::Mode64, EMPTY_EXTRA_MODE, None);
     /// assert!(cs.is_ok());
     /// ```
-    pub fn new_raw(arch: Arch, mode: Mode) -> CsResult<Capstone> {
+    pub fn new_raw<T: Iterator<Item = ExtraMode>>(
+        arch: Arch,
+        mode: Mode,
+        extra_mode: T,
+        endian: Option<Endian>,
+    ) -> CsResult<Capstone> {
         let mut handle = 0;
         let csarch: cs_arch = arch.into();
         let csmode: cs_mode = mode.into();
-        let err = unsafe { cs_open(csarch, csmode, &mut handle) };
+
+        let endian = match endian {
+            Some(endian) => cs_mode::from(endian) as usize,
+            None => 0,
+        };
+        let extra_mode = Self::get_extra_mode_value(extra_mode);
+
+        let err = unsafe {
+            let combined_mode: usize = csmode as usize | endian | extra_mode;
+            let combined_mode: cs_mode = mem::transmute(combined_mode as CsModeRepr);
+            cs_open(csarch, combined_mode, &mut handle)
+        };
 
         if cs_err::CS_ERR_OK == err {
             let syntax = CS_OPT_SYNTAX_DEFAULT as usize;
             let raw_mode = 0usize;
-            let endian = 0usize;
-            let extra_mode = 0usize;
             let detail_enabled = false;
 
             let mut cs = Capstone {
@@ -148,6 +179,12 @@ impl Capstone {
         })
     }
 
+    /// Returns the raw mode value, which is useful for debugging
+    #[allow(dead_code)]
+    pub(crate) fn raw_mode(&self) -> usize {
+        self.raw_mode
+    }
+
     /// Update `raw_mode` with the bitwise OR of `mode`, `extra_mode`, and `endian`.
     ///
     /// Returns the new `raw_mode`.
@@ -156,12 +193,25 @@ impl Capstone {
         self.raw_mode
     }
 
+    /// Return the integer value used by capstone to represent the set of extra modes
+    fn get_extra_mode_value<T: Iterator<Item = ExtraMode>>(extra_mode: T) -> usize {
+        // Bitwise OR extra modes
+        extra_mode.fold(0usize, |acc, x| acc | cs_mode::from(x) as usize)
+    }
+
     /// Set extra modes in addition to normal `mode`
     pub fn set_extra_mode<T: Iterator<Item = ExtraMode>>(&mut self, extra_mode: T) -> CsResult<()> {
         let old_val = self.extra_mode;
 
-        // Bitwise OR extra modes
-        self.extra_mode = extra_mode.fold(0usize, |acc, x| acc | cs_mode::from(x) as usize);
+        self.extra_mode = Self::get_extra_mode_value(extra_mode);
+
+        // This is a workaround for capstone bug in `arch/Mips/MipsModule.c` where handle->disasm
+        // is set to Mips64_getInstruction if CS_MODE_32 is not set. We need to set CS_MODE_32
+        // ourselves.
+        if self._arch == Arch::MIPS && self.mode == CS_MODE_MIPS32R6 as usize {
+            self.extra_mode |= cs_mode::CS_MODE_32 as usize;
+        }
+
         let old_mode = self.raw_mode;
         let new_mode = self.update_raw_mode();
         let result = self._set_cs_option(cs_opt_type::CS_OPT_MODE, new_mode);
@@ -177,6 +227,7 @@ impl Capstone {
 
     /// Set the assembly syntax (has no effect on some platforms)
     pub fn set_syntax(&mut self, syntax: Syntax) -> CsResult<()> {
+        // Todo(tmfink) check for valid syntax
         let syntax_usize = cs_opt_value::from(syntax) as usize;
         let result = self._set_cs_option(cs_opt_type::CS_OPT_SYNTAX, syntax_usize);
 
@@ -188,13 +239,16 @@ impl Capstone {
     }
 
     define_set_mode!(
-        /// Set the endianness (has no effect on some platforms)
-        => set_endian, CS_OPT_MODE, endian : Endian; cs_mode);
+    /// Set the endianness (has no effect on some platforms).
+    /// This is not public because capstone has some bugs where the endianness cannot be
+    /// changed dynamically.
+    #[allow(unused)]
+    => , set_endian, CS_OPT_MODE, endian : Endian; cs_mode);
     define_set_mode!(
-        /// Sets the engine's disassembly mode.
-        /// Be careful, various combinations of modes aren't supported
-        /// See the capstone-sys documentation for more information.
-        => set_mode, CS_OPT_MODE, mode : Mode; cs_mode);
+    /// Sets the engine's disassembly mode.
+    /// Be careful, various combinations of modes aren't supported
+    /// See the capstone-sys documentation for more information.
+    => pub, set_mode, CS_OPT_MODE, mode : Mode; cs_mode);
 
     /// Returns an `CsResult::Err` based on current errno.
     fn error_result<T>(&self) -> CsResult<T> {
@@ -245,6 +299,8 @@ impl Capstone {
     }
 
     /// Converts an instruction id `insn_id` to a `String` containing the instruction name.
+    ///
+    /// Note: This function ignores the current syntax and uses the default syntax.
     pub fn insn_name(&self, insn_id: u64) -> Option<String> {
         let insn_name = unsafe {
             let _insn_name = cs_insn_name(self.csh, insn_id as libc::c_uint);
@@ -367,5 +423,44 @@ impl Capstone {
 impl Drop for Capstone {
     fn drop(&mut self) {
         unsafe { cs_close(&mut self.csh) };
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn test_set_extra_mode_helper(
+        arch: Arch,
+        mode: Mode,
+        endian: Endian,
+        extra_modes: &[ExtraMode],
+        expected_raw_mode: usize,
+    ) {
+        let mut cs = Capstone::new_raw(arch, mode, EMPTY_EXTRA_MODE, None).unwrap();
+        cs.set_endian(endian).unwrap();
+        cs.set_extra_mode(extra_modes.iter().map(|x| *x)).unwrap();
+        let actual_raw_mode = cs.raw_mode();
+        assert_eq!(
+            expected_raw_mode,
+            actual_raw_mode,
+            "Mismatched raw_mode: expected={:x}, actual={:x}",
+            expected_raw_mode,
+            actual_raw_mode
+        );
+    }
+
+    #[test]
+    fn test_set_extra_mode() {
+        use capstone_sys::cs_mode::*;
+
+        test_set_extra_mode_helper(
+            Arch::MIPS,
+            Mode::Mips32R6,
+            Endian::Big,
+            &[ExtraMode::Micro],
+            (CS_MODE_BIG_ENDIAN as usize) | (CS_MODE_MIPS32R6 as usize) | (CS_MODE_32 as usize) |
+                (CS_MODE_MICRO as usize),
+        );
     }
 }

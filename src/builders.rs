@@ -129,13 +129,11 @@ macro_rules! define_arch_builder {
                                 return Err(Error::CustomError(msg));
                             }
                         };
+                        let extra_mode = self.extra_mode.iter().map(|x| ExtraMode::from(*x));
                         let mut capstone = Capstone::new_raw(Arch::$arch_variant,
-                                                             mode.into())?;
-                        capstone.set_extra_mode(self.extra_mode.iter()
-                            .map(|x| ExtraMode::from(*x)))?;
-                        if let Some(endian) = self.endian {
-                            capstone.set_endian(endian)?;
-                        }
+                                                             mode.into(),
+                                                             extra_mode,
+                                                             self.endian)?;
                         if let Some(syntax) = self.syntax {
                             capstone.set_syntax(Syntax::from(syntax))?;
                         }
@@ -210,7 +208,9 @@ define_arch_builder!(
             MClass,
             V8,
             )
-        ( syntax: )
+        ( syntax:
+            NoRegName,
+            )
         ( both_endian: true )
     ]
     [
@@ -243,12 +243,15 @@ define_arch_builder!(
             Mode64,
             )
         ( extra_modes: )
-        ( syntax: )
+        ( syntax:
+            NoRegName,
+            )
         ( both_endian: true )
     ]
     [
         ( sparc, SPARC )
         ( mode:
+            Default,
             V9,
             )
         ( extra_modes: )

@@ -95,13 +95,13 @@ define_cs_enum_wrapper!(
     => MClass = CS_MODE_MCLASS;
     /// ARMv8 A32 encodings for ARM. Works with `Arm` and `Thumb` modes.
     => V8 = CS_MODE_V8;
-    /// MicroMips mode (MIPS)
+    /// MicroMips mode. Works in `MIPS` mode.
     => Micro = CS_MODE_MICRO;
 );
 
 define_cs_enum_wrapper!(
     [
-        /// Disassembler modes
+        /// Disassembler endianness
         => Endian = cs_mode
     ]
     /// Little-endian mode
@@ -112,13 +112,15 @@ define_cs_enum_wrapper!(
 
 define_cs_enum_wrapper!(
     [
-        /// Architectures for the disassembler
+        /// Disassembly syntax
         => Syntax = cs_opt_value
     ]
     /// Intel syntax
     => Intel = CS_OPT_SYNTAX_INTEL;
     /// AT&T syntax (also known as GNU assembler/GAS syntax)
     => Att = CS_OPT_SYNTAX_ATT;
+    /// No register name
+    => NoRegName = CS_OPT_SYNTAX_NOREGNAME;
 );
 
 pub(crate) struct OptValue(pub cs_opt_value);
@@ -130,5 +132,21 @@ impl From<bool> for OptValue {
         } else {
             OptValue(cs_opt_value::CS_OPT_OFF)
         }
+    }
+}
+
+/// Representation of `cs_mode`. We use this to have a type that we can transmute() to that has
+/// the same memory representation.
+pub(crate) type CsModeRepr = i32;
+
+#[cfg(test)]
+mod test {
+    use capstone_sys::cs_mode;
+    use std::mem;
+    use super::CsModeRepr;
+
+    #[test]
+    fn test_cs_mode_size() {
+        assert_eq!(mem::size_of::<cs_mode>(), mem::size_of::<CsModeRepr>());
     }
 }
