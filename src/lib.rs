@@ -468,6 +468,7 @@ mod test {
     }
 
     fn test_arch_mode_endian_insns(
+        cs: &mut Capstone,
         arch: Arch,
         mode: Mode,
         endian: Option<Endian>,
@@ -480,9 +481,10 @@ mod test {
             .collect();
 
         let extra_mode = extra_mode.iter().map(|x| *x);
-        let mut cs = Capstone::new_raw(arch, mode, extra_mode, endian).unwrap();
+        let mut cs_raw = Capstone::new_raw(arch, mode, extra_mode, endian).unwrap();
 
-        instructions_match(&mut cs, expected_insns.as_slice(), true);
+        instructions_match(&mut cs_raw, expected_insns.as_slice(), true);
+        instructions_match(cs, expected_insns.as_slice(), true);
     }
 
     #[test]
@@ -536,7 +538,7 @@ mod test {
         ];
 
         for &(arch, mode) in rules.iter() {
-            let mut cs = Capstone::new_raw(arch, mode, EMPTY_EXTRA_MODE, None).unwrap();
+            let mut cs = Capstone::new_raw(arch, mode, NO_EXTRA_MODE, None).unwrap();
             for &syntax in syntaxes.iter() {
                 let result = cs.set_syntax(syntax);
                 assert!(result.is_err(), "Expected Err, got {:?}", result);
@@ -546,7 +548,7 @@ mod test {
 
     #[test]
     fn test_invalid_mode() {
-        if let Err(err) = Capstone::new_raw(Arch::PPC, Mode::Thumb, EMPTY_EXTRA_MODE, None) {
+        if let Err(err) = Capstone::new_raw(Arch::PPC, Mode::Thumb, NO_EXTRA_MODE, None) {
             assert_eq!(err, Error::Capstone(CapstoneError::InvalidMode));
         } else {
             panic!("Should fail to create given modes");
@@ -590,6 +592,11 @@ mod test {
     #[test]
     fn test_arch_arm() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .arm()
+                .mode(arm::ArchMode::Arm)
+                .build()
+                .unwrap(),
             Arch::ARM,
             Mode::Arm,
             None,
@@ -609,6 +616,11 @@ mod test {
             ],
         );
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .arm()
+                .mode(arm::ArchMode::Thumb)
+                .build()
+                .unwrap(),
             Arch::ARM,
             Mode::Thumb,
             None,
@@ -633,6 +645,11 @@ mod test {
             ],
         );
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .arm()
+                .mode(arm::ArchMode::Thumb)
+                .build()
+                .unwrap(),
             Arch::ARM,
             Mode::Thumb,
             None,
@@ -651,6 +668,12 @@ mod test {
             ],
         );
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .arm()
+                .mode(arm::ArchMode::Thumb)
+                .extra_mode([arm::ArchExtraMode::MClass].iter().map(|x| *x))
+                .build()
+                .unwrap(),
             Arch::ARM,
             Mode::Thumb,
             None,
@@ -658,6 +681,12 @@ mod test {
             &[("mrs", b"\xef\xf3\x02\x80")],
         );
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .arm()
+                .mode(arm::ArchMode::Arm)
+                .extra_mode([arm::ArchExtraMode::V8].iter().map(|x| *x))
+                .build()
+                .unwrap(),
             Arch::ARM,
             Mode::Arm,
             None,
@@ -673,6 +702,11 @@ mod test {
     #[test]
     fn test_arch_arm64() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .arm64()
+                .mode(arm64::ArchMode::Arm)
+                .build()
+                .unwrap(),
             Arch::ARM64,
             Mode::Arm,
             None,
@@ -702,6 +736,11 @@ mod test {
     #[test]
     fn test_arch_mips() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .mips()
+                .mode(mips::ArchMode::Mips32R6)
+                .build()
+                .unwrap(),
             Arch::MIPS,
             Mode::Mips32R6,
             Some(Endian::Little),
@@ -710,6 +749,12 @@ mod test {
         );
 
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .mips()
+                .mode(mips::ArchMode::Mips32R6)
+                .endian(Endian::Big)
+                .build()
+                .unwrap(),
             Arch::MIPS,
             Mode::Mips32R6,
             Some(Endian::Big),
@@ -725,6 +770,13 @@ mod test {
         );
 
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .mips()
+                .mode(mips::ArchMode::Mips32R6)
+                .extra_mode([mips::ArchExtraMode::Micro].iter().map(|x| *x))
+                .endian(Endian::Big)
+                .build()
+                .unwrap(),
             Arch::MIPS,
             Mode::Mips32R6,
             Some(Endian::Big),
@@ -738,6 +790,12 @@ mod test {
         );
 
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .mips()
+                .mode(mips::ArchMode::Mips32R6)
+                .endian(Endian::Big)
+                .build()
+                .unwrap(),
             Arch::MIPS,
             Mode::Mips32R6,
             Some(Endian::Big),
@@ -753,6 +811,12 @@ mod test {
     #[test]
     fn test_arch_ppc() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .ppc()
+                .mode(ppc::ArchMode::Mode32)
+                .endian(Endian::Big)
+                .build()
+                .unwrap(),
             Arch::PPC,
             // Mode::Mode32,
             Mode::Default,
@@ -779,9 +843,14 @@ mod test {
     #[test]
     fn test_arch_sparc() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .sparc()
+                .mode(sparc::ArchMode::Default)
+                .build()
+                .unwrap(),
             Arch::SPARC,
             Mode::Default,
-            Some(Endian::Big),
+            None,
             &[],
             &[
                 ("cmp", b"\x80\xa0\x40\x02"),
@@ -804,6 +873,11 @@ mod test {
         );
 
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .sparc()
+                .mode(sparc::ArchMode::V9)
+                .build()
+                .unwrap(),
             Arch::SPARC,
             Mode::V9,
             Some(Endian::Big),
@@ -820,6 +894,11 @@ mod test {
     #[test]
     fn test_arch_systemz() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .sysz()
+                .mode(sysz::ArchMode::Default)
+                .build()
+                .unwrap(),
             Arch::SYSZ,
             Mode::Default,
             None,
@@ -841,6 +920,11 @@ mod test {
     #[test]
     fn test_arch_x86() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .x86()
+                .mode(x86::ArchMode::Mode16)
+                .build()
+                .unwrap(),
             Arch::X86,
             Mode::Mode16,
             None,
@@ -865,6 +949,11 @@ mod test {
         );
 
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .x86()
+                .mode(x86::ArchMode::Mode32)
+                .build()
+                .unwrap(),
             Arch::X86,
             Mode::Mode32,
             None,
@@ -883,6 +972,11 @@ mod test {
         );
 
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .x86()
+                .mode(x86::ArchMode::Mode64)
+                .build()
+                .unwrap(),
             Arch::X86,
             Mode::Mode64,
             None,
@@ -894,6 +988,11 @@ mod test {
     #[test]
     fn test_arch_xcore() {
         test_arch_mode_endian_insns(
+            &mut Capstone::new()
+                .xcore()
+                .mode(xcore::ArchMode::Default)
+                .build()
+                .unwrap(),
             Arch::XCORE,
             Mode::Default,
             None,

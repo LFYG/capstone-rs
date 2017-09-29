@@ -64,10 +64,11 @@ macro_rules! define_set_mode {
     }
 }
 
-/// Singleton `EmptyExtraModeIter` that represents no extra modes being enabled
-pub static EMPTY_EXTRA_MODE: EmptyExtraModeIter = EmptyExtraModeIter(PhantomData);
+/// Represents that no extra modes are enabled. Can be passed to `Capstone::new_raw()` as the
+/// `extra_mode` argument.
+pub static NO_EXTRA_MODE: EmptyExtraModeIter = EmptyExtraModeIter(PhantomData);
 
-/// Represents an empty set of `ExtraMode`
+/// Represents an empty set of `ExtraMode`.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EmptyExtraModeIter(PhantomData<()>);
 
@@ -95,8 +96,8 @@ impl Capstone {
     /// The user must ensure that only sensical `Arch`/`Mode` combinations are used.
     ///
     /// ```
-    /// use capstone::{Arch, Capstone, EMPTY_EXTRA_MODE, Mode};
-    /// let cs = Capstone::new_raw(Arch::X86, Mode::Mode64, EMPTY_EXTRA_MODE, None);
+    /// use capstone::{Arch, Capstone, NO_EXTRA_MODE, Mode};
+    /// let cs = Capstone::new_raw(Arch::X86, Mode::Mode64, NO_EXTRA_MODE, None);
     /// assert!(cs.is_ok());
     /// ```
     pub fn new_raw<T: Iterator<Item = ExtraMode>>(
@@ -437,7 +438,7 @@ mod test {
         extra_modes: &[ExtraMode],
         expected_raw_mode: usize,
     ) {
-        let mut cs = Capstone::new_raw(arch, mode, EMPTY_EXTRA_MODE, None).unwrap();
+        let mut cs = Capstone::new_raw(arch, mode, NO_EXTRA_MODE, None).unwrap();
         cs.set_endian(endian).unwrap();
         cs.set_extra_mode(extra_modes.iter().map(|x| *x)).unwrap();
         let actual_raw_mode = cs.raw_mode();
