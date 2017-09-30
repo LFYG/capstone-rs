@@ -114,7 +114,7 @@ impl Capstone {
             Some(endian) => cs_mode::from(endian) as usize,
             None => 0,
         };
-        let extra_mode = Self::get_extra_mode_value(extra_mode);
+        let extra_mode = Self::extra_mode_value(extra_mode);
 
         let err = unsafe {
             let combined_mode: usize = csmode as usize | endian | extra_mode;
@@ -195,7 +195,7 @@ impl Capstone {
     }
 
     /// Return the integer value used by capstone to represent the set of extra modes
-    fn get_extra_mode_value<T: Iterator<Item = ExtraMode>>(extra_mode: T) -> usize {
+    fn extra_mode_value<T: Iterator<Item = ExtraMode>>(extra_mode: T) -> usize {
         // Bitwise OR extra modes
         extra_mode.fold(0usize, |acc, x| acc | cs_mode::from(x) as usize)
     }
@@ -204,7 +204,7 @@ impl Capstone {
     pub fn set_extra_mode<T: Iterator<Item = ExtraMode>>(&mut self, extra_mode: T) -> CsResult<()> {
         let old_val = self.extra_mode;
 
-        self.extra_mode = Self::get_extra_mode_value(extra_mode);
+        self.extra_mode = Self::extra_mode_value(extra_mode);
 
         // This is a workaround for capstone bug in `arch/Mips/MipsModule.c` where handle->disasm
         // is set to Mips64_getInstruction if CS_MODE_32 is not set. We need to set CS_MODE_32
